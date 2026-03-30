@@ -10,7 +10,7 @@ import streamlit as st
 st.set_page_config(page_title="PDF to Excel Transposer", layout="wide")
 st.title("Carhartt PDF to Excel")
 st.write(
-    "v1.0"
+    "v1.0 by MM"
 )
 
 
