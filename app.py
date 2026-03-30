@@ -1,5 +1,5 @@
-import re
 import io
+import re
 
 import pandas as pd
 import pdfplumber
@@ -8,92 +8,151 @@ import streamlit as st
 
 st.set_page_config(page_title="PDF to Excel Transposer", layout="wide")
 st.title("PDF to Excel - Trasposizione ordini")
+st.write(
+    "Carica uno o più PDF ordine. "
+    "Lo script estrae CODICE, COLORE, DESCRIZIONE, PREZZO WHS, PREZZO RTL "
+    "e le quantità per taglia, poi genera un file Excel."
+)
+
+
+STATIC_COLS = ["CODICE", "COLORE", "DESCRIZIONE", "PREZZO WHS", "PREZZO RTL"]
+ALPHA_SIZE_ORDER = {
+    "XXS": 0,
+    "XS": 1,
+    "S": 2,
+    "M": 3,
+    "L": 4,
+    "XL": 5,
+    "XXL": 6,
+}
 
 
 def normalize_text(value: str) -> str:
-    return re.sub(r"\s+", " ", value or "").strip()
+    return re.sub(r"\s+", " ", str(value or "")).strip()
 
 
 def normalize_size(size: str) -> str:
-    size = normalize_text(str(size)).upper()
+    size = normalize_text(size).upper()
     if size == "0":
         return "UNICA"
     return size
 
 
 def parse_price_line(text: str):
-    m = re.search(r"Prezzo\s+EUR\s+([\d.,]+)\s*/\s*([\d.,]+)", text, re.IGNORECASE)
-    if not m:
-        return None, None
-    return m.group(1), m.group(2)
+    """
+    Esempio:
+    'Prima data di cons. 19.03.26 Ultima data di cons. 19.03.26 Prezzo EUR 45,45 / 109,00 Sconto 4%'
+    """
+    match = re.search(r"Prezzo\s+EUR\s+([\d.,]+)\s*/\s*([\d.,]+)", text, re.IGNORECASE)
+    if not match:
+        return "", ""
+    return match.group(1), match.group(2)
 
 
-def to_lines(words, y_tol=3):
-    rows = []
-    for w in sorted(words, key=lambda x: (round(x["top"], 1), x["x0"])):
-        placed = False
-        for row in rows:
-            if abs(row["top"] - w["top"]) <= y_tol:
-                row["words"].append(w)
-                placed = True
-                break
-        if not placed:
-            rows.append({"top": w["top"], "words": [w]})
+def parse_header(line_text: str):
+    """
+    Esempio:
+    I030468 - 01.60 Landon Pant 100% Cotton 'Robertson' Denim, 12 oz Blue heavy stone wash
+    """
+    match = re.match(r"^(I[0-9A-Z]+)\s*-\s*([0-9A-Z.]+)\s+(.*)$", line_text)
+    if not match:
+        return None, None, None
 
-    normalized_rows = []
-    for row in rows:
-        ws = sorted(row["words"], key=lambda x: x["x0"])
-        text = " ".join(w["text"] for w in ws)
-        normalized_rows.append(
-            {
-                "top": row["top"],
-                "words": ws,
-                "text": normalize_text(text),
-            }
-        )
-    return normalized_rows
+    codice = match.group(1).strip()
+    colore_raw = match.group(2).strip()
+    descrizione = normalize_text(match.group(3))
+
+    # 01.60 -> 0160, 00E.02 -> 00E02, ecc.
+    colore = colore_raw.replace(".", "")
+    return codice, colore, descrizione
 
 
 def is_product_header(line_text: str) -> bool:
     return bool(re.match(r"^I[0-9A-Z]+\s*-\s*[0-9A-Z.]+", line_text))
 
 
-def parse_header(line_text: str):
-    m = re.match(r"^(I[0-9A-Z]+)\s*-\s*([0-9A-Z.]+)\s+(.*)$", line_text)
-    if not m:
-        return None, None, None
-    codice = m.group(1).strip()
-    colore_raw = m.group(2).strip()
-    descrizione = normalize_text(m.group(3))
-    colore = colore_raw.replace(".", "")
-    return codice, colore, descrizione
+def to_lines(words, y_tol=3):
+    """
+    Raggruppa le parole estratte da pdfplumber in righe usando la coordinata verticale.
+    """
+    rows = []
+
+    for word in sorted(words, key=lambda x: (round(x["top"], 1), x["x0"])):
+        placed = False
+        for row in rows:
+            if abs(row["top"] - word["top"]) <= y_tol:
+                row["words"].append(word)
+                placed = True
+                break
+
+        if not placed:
+            rows.append({"top": word["top"], "words": [word]})
+
+    normalized_rows = []
+    for row in rows:
+        sorted_words = sorted(row["words"], key=lambda x: x["x0"])
+        text = " ".join(w["text"] for w in sorted_words)
+        normalized_rows.append(
+            {
+                "top": row["top"],
+                "words": sorted_words,
+                "text": normalize_text(text),
+            }
+        )
+
+    return normalized_rows
 
 
 def extract_size_positions(taglia_line):
+    """
+    Restituisce lista di tuple (taglia, x0), ignorando la parola 'Taglia'.
+    """
     sizes = []
-    for w in taglia_line["words"]:
-        txt = w["text"].strip()
+    if not taglia_line:
+        return sizes
+
+    for word in taglia_line["words"]:
+        txt = normalize_text(word["text"])
         if txt.lower() == "taglia":
             continue
-        txt = normalize_size(txt)
-        sizes.append((txt, w["x0"]))
+        sizes.append((normalize_size(txt), word["x0"]))
+
     return sizes
 
 
 def extract_qty_positions(qta_line):
+    """
+    Restituisce lista di tuple (quantità, x0), ignorando la parola 'Quantità'.
+    """
     qtys = []
-    for w in qta_line["words"]:
-        txt = w["text"].strip()
+    if not qta_line:
+        return qtys
+
+    for word in qta_line["words"]:
+        txt = normalize_text(word["text"])
         if txt.lower() == "quantità":
             continue
         if re.fullmatch(r"\d+", txt):
-            qtys.append((int(txt), w["x0"]))
+            qtys.append((int(txt), word["x0"]))
+
     return qtys
 
 
-def map_quantities_to_sizes(sizes, qtys, max_distance=25):
+def map_quantities_to_sizes(sizes, qtys, max_distance=35):
+    """
+    Abbina le quantità alle taglie usando la vicinanza orizzontale.
+    Caso speciale fondamentale:
+    se c'è una sola taglia nel blocco, tutta la quantità va a quella taglia.
+    """
     result = {size: 0 for size, _ in sizes}
+
     if not sizes or not qtys:
+        return result
+
+    # Caso monomisura, es. Taglia 0 -> UNICA
+    if len(sizes) == 1:
+        only_size = sizes[0][0]
+        result[only_size] = sum(qty for qty, _ in qtys)
         return result
 
     for qty, qx in qtys:
@@ -113,13 +172,19 @@ def map_quantities_to_sizes(sizes, qtys, max_distance=25):
 
 
 def parse_product_block(lines):
+    """
+    Estrae un singolo prodotto da un blocco righe.
+    """
+    if not lines:
+        return None
+
     header_line = lines[0]["text"]
     codice, colore, descrizione = parse_header(header_line)
     if not codice:
         return None
 
-    prezzo_whs = None
-    prezzo_rtl = None
+    prezzo_whs = ""
+    prezzo_rtl = ""
     taglia_line = None
     qta_line = None
 
@@ -135,9 +200,9 @@ def parse_product_block(lines):
         if text.startswith("Quantità"):
             qta_line = line
 
-    sizes = extract_size_positions(taglia_line) if taglia_line else []
-    qtys = extract_qty_positions(qta_line) if qta_line else []
-    mapped = map_quantities_to_sizes(sizes, qtys)
+    sizes = extract_size_positions(taglia_line)
+    qtys = extract_qty_positions(qta_line)
+    mapped = map_quantities_to_sizes(sizes, qtys, max_distance=35)
 
     record = {
         "CODICE": codice,
@@ -149,7 +214,7 @@ def parse_product_block(lines):
 
     for size, qty in mapped.items():
         if qty:
-            record[str(size)] = qty
+            record[size] = qty
 
     return record
 
@@ -173,7 +238,11 @@ def parse_pdf(file_obj):
             ]
 
             for i, start_idx in enumerate(product_start_indexes):
-                end_idx = product_start_indexes[i + 1] if i + 1 < len(product_start_indexes) else len(lines)
+                end_idx = (
+                    product_start_indexes[i + 1]
+                    if i + 1 < len(product_start_indexes)
+                    else len(lines)
+                )
                 block_lines = lines[start_idx:end_idx]
 
                 product = parse_product_block(block_lines)
@@ -183,50 +252,38 @@ def parse_pdf(file_obj):
     return records
 
 
-def size_sort_key(val):
-    val = str(val).upper().strip()
+def size_sort_key(value: str):
+    value = normalize_text(value).upper()
 
-    if val == "UNICA":
+    if value == "UNICA":
         return (0, 0)
 
-    if re.fullmatch(r"\d+", val):
-        return (1, int(val))
+    if re.fullmatch(r"\d+", value):
+        return (1, int(value))
 
-    alpha_order = {
-        "XXS": 0,
-        "XS": 1,
-        "S": 2,
-        "M": 3,
-        "L": 4,
-        "XL": 5,
-        "XXL": 6,
-    }
+    if value in ALPHA_SIZE_ORDER:
+        return (2, ALPHA_SIZE_ORDER[value])
 
-    if val in alpha_order:
-        return (2, alpha_order[val])
-
-    return (3, val)
+    return (3, value)
 
 
 def build_dataframe(all_records):
     if not all_records:
         return pd.DataFrame()
 
-    static_cols = ["CODICE", "COLORE", "DESCRIZIONE", "PREZZO WHS", "PREZZO RTL"]
-
     size_cols = set()
-    for r in all_records:
-        for key in r.keys():
-            if key not in static_cols:
+    for record in all_records:
+        for key in record.keys():
+            if key not in STATIC_COLS:
                 size_cols.add(key)
 
     ordered_size_cols = sorted(size_cols, key=size_sort_key)
 
     rows = []
-    for r in all_records:
-        row = {col: r.get(col, "") for col in static_cols}
-        for size in ordered_size_cols:
-            row[size] = r.get(size, "")
+    for record in all_records:
+        row = {col: record.get(col, "") for col in STATIC_COLS}
+        for size_col in ordered_size_cols:
+            row[size_col] = record.get(size_col, "")
         rows.append(row)
 
     return pd.DataFrame(rows)
@@ -239,12 +296,22 @@ def dataframe_to_excel_bytes(df: pd.DataFrame) -> bytes:
         df.to_excel(writer, index=False, sheet_name="ORDINE")
         ws = writer.book["ORDINE"]
 
+        # Freeze header
+        ws.freeze_panes = "A2"
+
+        # Autofilter
+        ws.auto_filter.ref = ws.dimensions
+
+        # Larghezza colonne
         for col in ws.columns:
             max_len = 0
             col_letter = col[0].column_letter
+
             for cell in col:
                 cell_value = "" if cell.value is None else str(cell.value)
-                max_len = max(max_len, len(cell_value))
+                if len(cell_value) > max_len:
+                    max_len = len(cell_value)
+
             ws.column_dimensions[col_letter].width = min(max_len + 2, 50)
 
     output.seek(0)
@@ -265,15 +332,21 @@ if uploaded_files:
             try:
                 records = parse_pdf(uploaded_file)
                 all_records.extend(records)
-            except Exception as e:
-                st.error(f"Errore su {uploaded_file.name}: {e}")
+            except Exception as exc:
+                st.error(f"Errore su {uploaded_file.name}: {exc}")
 
     df = build_dataframe(all_records)
 
     if df.empty:
         st.warning("Non sono riuscito a trovare prodotti nel PDF.")
     else:
+        total_qty = 0
+        for col in df.columns:
+            if col not in STATIC_COLS:
+                total_qty += pd.to_numeric(df[col], errors="coerce").fillna(0).sum()
+
         st.success(f"Prodotti estratti: {len(df)}")
+        st.info(f"Totale quantità estratte: {int(total_qty)}")
         st.dataframe(df, use_container_width=True)
 
         excel_bytes = dataframe_to_excel_bytes(df)
