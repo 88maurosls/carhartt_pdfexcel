@@ -1,4 +1,5 @@
 import io
+import os
 import re
 
 import pandas as pd
@@ -56,6 +57,48 @@ def parse_header(line_text: str):
     colore = colore_raw.replace(".", "")
 
     return codice, colore, descrizione
+
+
+def extract_order_confirmation_number(file_obj):
+    """
+    Estrae il numero 'Conferma dell'ordine' dal PDF, es. 26VA028707
+    """
+    file_obj.seek(0)
+
+    with pdfplumber.open(file_obj) as pdf:
+        for page in pdf.pages:
+            text = page.extract_text() or ""
+            text = normalize_text(text)
+
+            match = re.search(r"Conferma dell['’]ordine\s+([A-Z0-9]+)", text, re.IGNORECASE)
+            if match:
+                file_obj.seek(0)
+                return match.group(1).strip()
+
+    file_obj.seek(0)
+    return ""
+
+
+def build_output_filename(uploaded_files, order_confirmation_number):
+    """
+    Se c'è un solo PDF:
+    nome originale + _numero conferma + .xlsx
+
+    Se ci sono più PDF:
+    export_trasposto + .xlsx
+    """
+    if len(uploaded_files) == 1:
+        original_name = uploaded_files[0].name
+        base_name = os.path.splitext(original_name)[0]
+
+        if order_confirmation_number:
+            return f"{base_name}_{order_confirmation_number}.xlsx"
+        return f"{base_name}.xlsx"
+
+    if order_confirmation_number:
+        return f"export_trasposto_{order_confirmation_number}.xlsx"
+
+    return "export_trasposto.xlsx"
 
 
 def is_product_header(line_text: str) -> bool:
@@ -118,7 +161,6 @@ def extract_qty_positions(qta_line):
 
         if re.fullmatch(r"\d+", txt):
             val = int(txt)
-            # Evita di prendere numeri di riepilogo tipo 103
             if val < 50:
                 qtys.append((val, word["x0"]))
 
@@ -178,7 +220,6 @@ def parse_product_block(lines):
         if text.startswith("Quantità") and "totale" not in text.lower():
             qta_line = line
 
-        # Bonus: fermati appena inizi la sezione riepilogo del blocco
         if text.startswith("Totale"):
             break
 
@@ -204,6 +245,7 @@ def parse_product_block(lines):
 def parse_pdf(file_obj):
     records = []
 
+    file_obj.seek(0)
     with pdfplumber.open(file_obj) as pdf:
         for page in pdf.pages:
             words = page.extract_words(
@@ -231,6 +273,7 @@ def parse_pdf(file_obj):
                 if product:
                     records.append(product)
 
+    file_obj.seek(0)
     return records
 
 
@@ -311,12 +354,18 @@ uploaded_files = st.file_uploader(
 
 if uploaded_files:
     all_records = []
+    order_confirmation_number = ""
 
     with st.spinner("Sto leggendo il PDF e creando l'Excel..."):
         for uploaded_file in uploaded_files:
             try:
+                if not order_confirmation_number:
+                    order_confirmation_number = extract_order_confirmation_number(uploaded_file)
+
+                uploaded_file.seek(0)
                 records = parse_pdf(uploaded_file)
                 all_records.extend(records)
+
             except Exception as exc:
                 st.error(f"Errore su {uploaded_file.name}: {exc}")
 
@@ -326,9 +375,14 @@ if uploaded_files:
         st.warning("Non sono riuscito a trovare prodotti nel PDF.")
     else:
         total_qty = calculate_total_qty(df)
+        output_filename = build_output_filename(uploaded_files, order_confirmation_number)
 
         st.success(f"Prodotti estratti: {len(df)}")
         st.info(f"Totale quantità estratte: {total_qty}")
+
+        if order_confirmation_number:
+            st.info(f"Conferma ordine rilevata: {order_confirmation_number}")
+
         st.dataframe(df, use_container_width=True)
 
         excel_bytes = dataframe_to_excel_bytes(df)
@@ -336,6 +390,6 @@ if uploaded_files:
         st.download_button(
             label="Scarica Excel",
             data=excel_bytes,
-            file_name="ordine_trasposto.xlsx",
+            file_name=output_filename,
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
