@@ -10,9 +10,7 @@ import streamlit as st
 st.set_page_config(page_title="PDF to Excel Transposer", layout="wide")
 st.title("Carhartt PDF to Excel")
 st.write(
-    "Carica uno o più PDF ordine. "
-    "Lo script estrae CODICE, COLORE, DESCRIZIONE, PREZZO WHS, PREZZO RTL "
-    "e le quantità per taglia, poi genera un file Excel."
+    "v1.0"
 )
 
 
