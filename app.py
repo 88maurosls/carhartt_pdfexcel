@@ -39,10 +39,6 @@ def normalize_size(size: str) -> str:
 
 
 def parse_price_line(text: str):
-    """
-    Esempio:
-    'Prima data di cons. 19.03.26 Ultima data di cons. 19.03.26 Prezzo EUR 45,45 / 109,00 Sconto 4%'
-    """
     match = re.search(r"Prezzo\s+EUR\s+([\d.,]+)\s*/\s*([\d.,]+)", text, re.IGNORECASE)
     if not match:
         return "", ""
@@ -50,10 +46,6 @@ def parse_price_line(text: str):
 
 
 def parse_header(line_text: str):
-    """
-    Esempio:
-    I030468 - 01.60 Landon Pant 100% Cotton 'Robertson' Denim, 12 oz Blue heavy stone wash
-    """
     match = re.match(r"^(I[0-9A-Z]+)\s*-\s*([0-9A-Z.]+)\s+(.*)$", line_text)
     if not match:
         return None, None, None
@@ -61,9 +53,8 @@ def parse_header(line_text: str):
     codice = match.group(1).strip()
     colore_raw = match.group(2).strip()
     descrizione = normalize_text(match.group(3))
-
-    # 01.60 -> 0160, 00E.02 -> 00E02, ecc.
     colore = colore_raw.replace(".", "")
+
     return codice, colore, descrizione
 
 
@@ -72,9 +63,6 @@ def is_product_header(line_text: str) -> bool:
 
 
 def to_lines(words, y_tol=3):
-    """
-    Raggruppa le parole estratte da pdfplumber in righe usando la coordinata verticale.
-    """
     rows = []
 
     for word in sorted(words, key=lambda x: (round(x["top"], 1), x["x0"])):
@@ -104,9 +92,6 @@ def to_lines(words, y_tol=3):
 
 
 def extract_size_positions(taglia_line):
-    """
-    Restituisce lista di tuple (taglia, x0), ignorando la parola 'Taglia'.
-    """
     sizes = []
     if not taglia_line:
         return sizes
@@ -121,35 +106,31 @@ def extract_size_positions(taglia_line):
 
 
 def extract_qty_positions(qta_line):
-    """
-    Restituisce lista di tuple (quantità, x0), ignorando la parola 'Quantità'.
-    """
     qtys = []
     if not qta_line:
         return qtys
 
     for word in qta_line["words"]:
         txt = normalize_text(word["text"])
+
         if txt.lower() == "quantità":
             continue
+
         if re.fullmatch(r"\d+", txt):
-            qtys.append((int(txt), word["x0"]))
+            val = int(txt)
+            # Evita di prendere numeri di riepilogo tipo 103
+            if val < 50:
+                qtys.append((val, word["x0"]))
 
     return qtys
 
 
 def map_quantities_to_sizes(sizes, qtys, max_distance=35):
-    """
-    Abbina le quantità alle taglie usando la vicinanza orizzontale.
-    Caso speciale fondamentale:
-    se c'è una sola taglia nel blocco, tutta la quantità va a quella taglia.
-    """
     result = {size: 0 for size, _ in sizes}
 
     if not sizes or not qtys:
         return result
 
-    # Caso monomisura, es. Taglia 0 -> UNICA
     if len(sizes) == 1:
         only_size = sizes[0][0]
         result[only_size] = sum(qty for qty, _ in qtys)
@@ -172,9 +153,6 @@ def map_quantities_to_sizes(sizes, qtys, max_distance=35):
 
 
 def parse_product_block(lines):
-    """
-    Estrae un singolo prodotto da un blocco righe.
-    """
     if not lines:
         return None
 
@@ -197,8 +175,12 @@ def parse_product_block(lines):
         if text.startswith("Taglia"):
             taglia_line = line
 
-        if text.startswith("Quantità"):
+        if text.startswith("Quantità") and "totale" not in text.lower():
             qta_line = line
+
+        # Bonus: fermati appena inizi la sezione riepilogo del blocco
+        if text.startswith("Totale"):
+            break
 
     sizes = extract_size_positions(taglia_line)
     qtys = extract_qty_positions(qta_line)
@@ -296,26 +278,29 @@ def dataframe_to_excel_bytes(df: pd.DataFrame) -> bytes:
         df.to_excel(writer, index=False, sheet_name="ORDINE")
         ws = writer.book["ORDINE"]
 
-        # Freeze header
         ws.freeze_panes = "A2"
-
-        # Autofilter
         ws.auto_filter.ref = ws.dimensions
 
-        # Larghezza colonne
         for col in ws.columns:
             max_len = 0
             col_letter = col[0].column_letter
 
             for cell in col:
                 cell_value = "" if cell.value is None else str(cell.value)
-                if len(cell_value) > max_len:
-                    max_len = len(cell_value)
+                max_len = max(max_len, len(cell_value))
 
             ws.column_dimensions[col_letter].width = min(max_len + 2, 50)
 
     output.seek(0)
     return output.getvalue()
+
+
+def calculate_total_qty(df: pd.DataFrame) -> int:
+    total_qty = 0
+    for col in df.columns:
+        if col not in STATIC_COLS:
+            total_qty += pd.to_numeric(df[col], errors="coerce").fillna(0).sum()
+    return int(total_qty)
 
 
 uploaded_files = st.file_uploader(
@@ -340,13 +325,10 @@ if uploaded_files:
     if df.empty:
         st.warning("Non sono riuscito a trovare prodotti nel PDF.")
     else:
-        total_qty = 0
-        for col in df.columns:
-            if col not in STATIC_COLS:
-                total_qty += pd.to_numeric(df[col], errors="coerce").fillna(0).sum()
+        total_qty = calculate_total_qty(df)
 
         st.success(f"Prodotti estratti: {len(df)}")
-        st.info(f"Totale quantità estratte: {int(total_qty)}")
+        st.info(f"Totale quantità estratte: {total_qty}")
         st.dataframe(df, use_container_width=True)
 
         excel_bytes = dataframe_to_excel_bytes(df)
