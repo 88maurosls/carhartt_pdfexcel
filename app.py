@@ -17,6 +17,7 @@ st.write(
 
 
 STATIC_COLS = ["CODICE", "COLORE", "DESCRIZIONE", "PREZZO WHS", "PREZZO RTL"]
+
 ALPHA_SIZE_ORDER = {
     "XXS": 0,
     "XS": 1,
@@ -25,6 +26,11 @@ ALPHA_SIZE_ORDER = {
     "L": 4,
     "XL": 5,
     "XXL": 6,
+    "XS-S": 7,
+    "S-M": 8,
+    "M-L": 9,
+    "L-XL": 10,
+    "XL-XXL": 11,
 }
 
 
@@ -34,8 +40,18 @@ def normalize_text(value: str) -> str:
 
 def normalize_size(size: str) -> str:
     size = normalize_text(size).upper()
+
     if size == "0":
         return "UNICA"
+
+    # Normalizza trattini diversi e spazi
+    size = size.replace("–", "-").replace("—", "-")
+    size = re.sub(r"\s*-\s*", "-", size)
+
+    # Normalizza slash in dash: S/M -> S-M
+    size = size.replace("/", "-")
+    size = re.sub(r"\s*-\s*", "-", size)
+
     return size
 
 
@@ -106,6 +122,9 @@ def is_product_header(line_text: str) -> bool:
 
 
 def to_lines(words, y_tol=3):
+    """
+    Raggruppa le words di pdfplumber in righe usando la coordinata verticale.
+    """
     rows = []
 
     for word in sorted(words, key=lambda x: (round(x["top"], 1), x["x0"])):
@@ -135,6 +154,9 @@ def to_lines(words, y_tol=3):
 
 
 def extract_size_positions(taglia_line):
+    """
+    Restituisce lista di tuple (taglia, x0), ignorando la parola 'Taglia'.
+    """
     sizes = []
     if not taglia_line:
         return sizes
@@ -149,6 +171,10 @@ def extract_size_positions(taglia_line):
 
 
 def extract_qty_positions(qta_line):
+    """
+    Restituisce lista di tuple (quantità, x0), ignorando la parola 'Quantità'.
+    Esclude numeri troppo grandi per evitare di prendere riepiloghi tipo 103.
+    """
     qtys = []
     if not qta_line:
         return qtys
@@ -168,6 +194,11 @@ def extract_qty_positions(qta_line):
 
 
 def map_quantities_to_sizes(sizes, qtys, max_distance=35):
+    """
+    Abbina le quantità alle taglie per vicinanza orizzontale.
+    Caso speciale:
+    se c'è una sola taglia nel blocco, assegna tutta la quantità a quella taglia.
+    """
     result = {size: 0 for size, _ in sizes}
 
     if not sizes or not qtys:
@@ -195,6 +226,9 @@ def map_quantities_to_sizes(sizes, qtys, max_distance=35):
 
 
 def parse_product_block(lines):
+    """
+    Estrae un singolo prodotto dal blocco di righe.
+    """
     if not lines:
         return None
 
@@ -220,6 +254,7 @@ def parse_product_block(lines):
         if text.startswith("Quantità") and "totale" not in text.lower():
             qta_line = line
 
+        # Bonus: ferma il parsing prima del riepilogo del blocco
         if text.startswith("Totale"):
             break
 
@@ -278,17 +313,21 @@ def parse_pdf(file_obj):
 
 
 def size_sort_key(value: str):
-    value = normalize_text(value).upper()
+    value = normalize_size(value)
 
+    # 1. UNICA
     if value == "UNICA":
         return (0, 0)
 
+    # 2. numeriche
     if re.fullmatch(r"\d+", value):
         return (1, int(value))
 
+    # 3. alfabetiche/custom
     if value in ALPHA_SIZE_ORDER:
         return (2, ALPHA_SIZE_ORDER[value])
 
+    # 4. fallback
     return (3, value)
 
 
@@ -332,7 +371,7 @@ def dataframe_to_excel_bytes(df: pd.DataFrame) -> bytes:
                 cell_value = "" if cell.value is None else str(cell.value)
                 max_len = max(max_len, len(cell_value))
 
-            ws.column_dimensions[col_letter].width = min(max_len + 2, 50)
+            ws.column_dimensions[col_letter].width = min(max_len + 2, 60)
 
     output.seek(0)
     return output.getvalue()
