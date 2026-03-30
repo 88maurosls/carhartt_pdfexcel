@@ -361,7 +361,6 @@ def dataframe_to_excel_bytes(df: pd.DataFrame) -> bytes:
         ws = writer.book["ORDINE"]
 
         ws.freeze_panes = "A2"
-        ws.auto_filter.ref = ws.dimensions
 
         for col in ws.columns:
             max_len = 0
