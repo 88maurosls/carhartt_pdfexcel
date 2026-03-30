@@ -1,6 +1,5 @@
 import re
 import io
-from collections import defaultdict
 
 import pandas as pd
 import pdfplumber
@@ -10,22 +9,19 @@ import streamlit as st
 st.set_page_config(page_title="PDF to Excel Transposer", layout="wide")
 st.title("PDF to Excel - Trasposizione ordini")
 
-st.write(
-    "Carica uno o più PDF ordine. "
-    "Lo script estrae CODICE, COLORE, DESCRIZIONE, PREZZO WHS, PREZZO RTL "
-    "e le quantità per taglia, poi genera un Excel."
-)
-
 
 def normalize_text(value: str) -> str:
     return re.sub(r"\s+", " ", value or "").strip()
 
 
+def normalize_size(size: str) -> str:
+    size = normalize_text(str(size)).upper()
+    if size == "0":
+        return "UNICA"
+    return size
+
+
 def parse_price_line(text: str):
-    """
-    Esempio:
-    'Prima data di cons. 19.03.26 Ultima data di cons. 19.03.26 Prezzo EUR 45,45 / 109,00 Sconto 4%'
-    """
     m = re.search(r"Prezzo\s+EUR\s+([\d.,]+)\s*/\s*([\d.,]+)", text, re.IGNORECASE)
     if not m:
         return None, None
@@ -33,9 +29,6 @@ def parse_price_line(text: str):
 
 
 def to_lines(words, y_tol=3):
-    """
-    Raggruppa le words di pdfplumber in righe.
-    """
     rows = []
     for w in sorted(words, key=lambda x: (round(x["top"], 1), x["x0"])):
         placed = False
@@ -66,10 +59,6 @@ def is_product_header(line_text: str) -> bool:
 
 
 def parse_header(line_text: str):
-    """
-    Esempio:
-    I030468 - 01.60 Landon Pant 100% Cotton 'Robertson' Denim, 12 oz Blue heavy stone wash
-    """
     m = re.match(r"^(I[0-9A-Z]+)\s*-\s*([0-9A-Z.]+)\s+(.*)$", line_text)
     if not m:
         return None, None, None
@@ -81,24 +70,17 @@ def parse_header(line_text: str):
 
 
 def extract_size_positions(taglia_line):
-    """
-    Restituisce lista di tuple (taglia, x0).
-    Ignora la parola 'Taglia'.
-    """
     sizes = []
     for w in taglia_line["words"]:
         txt = w["text"].strip()
         if txt.lower() == "taglia":
             continue
+        txt = normalize_size(txt)
         sizes.append((txt, w["x0"]))
     return sizes
 
 
 def extract_qty_positions(qta_line):
-    """
-    Restituisce lista di tuple (quantità, x0).
-    Ignora la parola 'Quantità'.
-    """
     qtys = []
     for w in qta_line["words"]:
         txt = w["text"].strip()
@@ -110,22 +92,15 @@ def extract_qty_positions(qta_line):
 
 
 def map_quantities_to_sizes(sizes, qtys, max_distance=25):
-    """
-    Abbina ogni quantità alla taglia con x più vicino.
-    Questo funziona bene su PDF come il tuo, dove le quantità sono allineate
-    sotto le taglie anche se i vuoti non vengono estratti come testo.
-    """
     result = {size: 0 for size, _ in sizes}
     if not sizes or not qtys:
         return result
-
-    size_positions = [(size, x) for size, x in sizes]
 
     for qty, qx in qtys:
         nearest_size = None
         nearest_dist = None
 
-        for size, sx in size_positions:
+        for size, sx in sizes:
             dist = abs(sx - qx)
             if nearest_dist is None or dist < nearest_dist:
                 nearest_dist = dist
@@ -138,9 +113,6 @@ def map_quantities_to_sizes(sizes, qtys, max_distance=25):
 
 
 def parse_product_block(lines):
-    """
-    lines = righe del singolo blocco prodotto
-    """
     header_line = lines[0]["text"]
     codice, colore, descrizione = parse_header(header_line)
     if not codice:
@@ -211,6 +183,31 @@ def parse_pdf(file_obj):
     return records
 
 
+def size_sort_key(val):
+    val = str(val).upper().strip()
+
+    if val == "UNICA":
+        return (0, 0)
+
+    if re.fullmatch(r"\d+", val):
+        return (1, int(val))
+
+    alpha_order = {
+        "XXS": 0,
+        "XS": 1,
+        "S": 2,
+        "M": 3,
+        "L": 4,
+        "XL": 5,
+        "XXL": 6,
+    }
+
+    if val in alpha_order:
+        return (2, alpha_order[val])
+
+    return (3, val)
+
+
 def build_dataframe(all_records):
     if not all_records:
         return pd.DataFrame()
@@ -222,11 +219,6 @@ def build_dataframe(all_records):
         for key in r.keys():
             if key not in static_cols:
                 size_cols.add(key)
-
-    def size_sort_key(val):
-        if re.fullmatch(r"\d+", val):
-            return (0, int(val))
-        return (1, val)
 
     ordered_size_cols = sorted(size_cols, key=size_sort_key)
 
@@ -242,6 +234,7 @@ def build_dataframe(all_records):
 
 def dataframe_to_excel_bytes(df: pd.DataFrame) -> bytes:
     output = io.BytesIO()
+
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name="ORDINE")
         ws = writer.book["ORDINE"]
